@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 
 
-plt.style.use("seaborn-v0_8")
+plt.style.use("default") 
 
 def load_json_file(uploaded_file):
     if uploaded_file is None:
