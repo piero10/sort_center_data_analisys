@@ -1,12 +1,12 @@
+import numpy as np
 import json
 from io import StringIO
-
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 
+plt.style.use("default")
 
-plt.style.use("default") 
 
 def load_json_file(uploaded_file):
     if uploaded_file is None:
@@ -14,7 +14,6 @@ def load_json_file(uploaded_file):
     if isinstance(uploaded_file, str):
         with open(uploaded_file, "r", encoding="utf-8") as f:
             return json.load(f)
-    # streamlit UploadedFile
     stringio = StringIO(uploaded_file.getvalue().decode("utf-8"))
     return json.load(stringio)
 
@@ -26,11 +25,13 @@ def build_arrivals_df(raw):
     df = pd.DataFrame(arrivals_gate)
     if df.empty:
         return df
-    df["arrival_datetime"] = pd.to_datetime(df["arrival_datetime"])
-    df["cut_off"] = pd.to_datetime(df["cut_off"])
-    df["time_to_cutoff_hours"] = (
-        df["cut_off"] - df["arrival_datetime"]
-    ).dt.total_seconds() / 3600
+
+    if not df.empty and 'unit' in df.columns:
+        unit_df = df['unit'].apply(pd.Series)
+        df = pd.concat([df.drop('unit', axis=1), unit_df], axis=1)
+
+    if 'arrival_datetime' in df.columns:
+        df["arrival_datetime"] = pd.to_datetime(df["arrival_datetime"])
     df = df.sort_values("arrival_datetime").reset_index(drop=True)
     return df
 
@@ -48,7 +49,6 @@ def build_workers_df(raw):
         .reset_index()
     )
 
-    # current_zone через stations, если есть
     if "stations" in raw:
         stations = raw["stations"]
         df_st = (
@@ -73,11 +73,10 @@ def build_workers_df(raw):
     else:
         df_workers["current_zone"] = pd.NA
 
-    # perf_*
-    if "performance" in df_workers.columns:
-        perf_expanded = df_workers["performance"].apply(pd.Series).add_prefix("perf_")
+    if "performance_units" in df_workers.columns:
+        perf_expanded = df_workers["performance_units"].apply(pd.Series).add_prefix("perf_")
         df_workers = pd.concat(
-            [df_workers.drop(columns=["performance"]), perf_expanded], axis=1
+            [df_workers.drop(columns=["performance_units"]), perf_expanded], axis=1
         )
 
     return df_workers
@@ -92,50 +91,56 @@ def build_stations_df(raw):
         .rename_axis("station_id")
         .reset_index()
     )
-    if "backlog_count" in df_st.columns:
-        bl = df_st["backlog_count"].apply(pd.Series).fillna(0)
-        bl = bl.add_prefix("backlog_")
-        df_st = pd.concat([df_st.drop(columns=["backlog_count"]), bl], axis=1)
-        df_st["backlog_total"] = df_st[[c for c in df_st.columns if c.startswith("backlog_")]].sum(axis=1)
+
+    if "backlog" in df_st.columns:
+        def expand_backlog(backlog_data):
+            if not backlog_data or "units" not in backlog_data:
+                return pd.Series({"backlog_SORT": 0, "backlog_NONSORT": 0})
+            units = backlog_data["units"]
+            sort_count = sum(u.get("postings_num", 0) for u in units if u.get("flow_type") == "SORT")
+            nonsort_count = sum(u.get("postings_num", 0) for u in units if u.get("flow_type") == "NONSORT")
+            return pd.Series({"backlog_SORT": sort_count, "backlog_NONSORT": nonsort_count})
+
+        bl = df_st["backlog"].apply(expand_backlog)
+        df_st = pd.concat([df_st.drop(columns=["backlog"]), bl], axis=1)
+        df_st["backlog_total"] = df_st[["backlog_SORT", "backlog_NONSORT"]].sum(axis=1)
+
     return df_st
 
 
-# ---------- Streamlit UI ----------
+st.set_page_config(page_title="Адаптированный анализ данных", layout="wide")
 
-st.set_page_config(page_title="Real Data Analysis", layout="wide")
+st.title("Анализ данных склада")
 
-st.title("Анализ реальных данных")
-
-tab_upload, tab_arrivals, tab_workers, tab_stations_backlog, tab_stations_workers = st.tabs(
-    [
-        "Загрузка файла",
-        "Приходы паллет",
-        "Рабочие",
-        "Станции — бэклоги",
-        "Станции — рабочие",
-    ]
-)
-
-# 1. Загрузка файла
+tab_upload, tab_arrivals, tab_workers, tab_stations_backlog, tab_stations_workers = st.tabs([
+    "Загрузка файла",
+    "Приходы паллет",
+    "Рабочие",
+    "Станции — бэклоги",
+    "Станции — рабочие",
+])
 
 with tab_upload:
-    st.header("1. Загрузка JSON файла")
-    uploaded = st.file_uploader("Загрузите JSON (data_model / paste)", type=["json", "txt"])
-    st.session_state["raw_json"] = load_json_file(uploaded) if uploaded is not None else st.session_state.get("raw_json")
+    st.header("Загрузка JSON файла")
+    uploaded = st.file_uploader("Загрузите JSON файл", type=["json", "txt"])
 
-    if st.session_state.get("raw_json") is not None:
-        st.success("Файл загружен")
-        if st.checkbox("Показать верхний уровень JSON"):
-            st.json({k: type(v).__name__ for k, v in st.session_state["raw_json"].items()})
+    if uploaded is not None:
+        try:
+            st.session_state["raw_json"] = load_json_file(uploaded)
+            st.success("Файл успешно загружен!")
+
+            if st.checkbox("Показать структуру JSON"):
+                st.json({k: str(type(v).__name__) + f" ({len(v) if hasattr(v, '__len__') else 'N/A'})"
+                         for k, v in st.session_state["raw_json"].items()})
+        except Exception as e:
+            st.error(f"Ошибка загрузки: {e}")
     else:
-        st.info("Загрузите файл, чтобы увидеть остальные вкладки в действии.")
+        st.info("Загрузите файл для анализа данных")
 
 raw = st.session_state.get("raw_json")
 
-# 2. Приходы паллет
-
 with tab_arrivals:
-    st.header("2. Приходы паллет (GATE)")
+    st.header("Приходы паллет (GATE)")
     if raw is None:
         st.warning("Сначала загрузите JSON на первой вкладке.")
     else:
@@ -143,45 +148,47 @@ with tab_arrivals:
         if df_arrivals is None or df_arrivals.empty:
             st.info("Нет данных в arrivals['GATE'].")
         else:
-            st.subheader("Таблица")
-            st.dataframe(df_arrivals.head(200))
+            st.subheader("Таблица прибытий")
+            st.dataframe(df_arrivals.head(200), use_container_width=True)
 
-            # временной ряд postings_count
-            fig, ax = plt.subplots(figsize=(6, 3))
-            ax.plot(df_arrivals["arrival_datetime"], df_arrivals["postings_count"], marker="o")
-            ax.set_title("Postings per pallet over time")
-            ax.set_xlabel("arrival_datetime")
-            ax.set_ylabel("postings_count")
-            plt.xticks(rotation=45)
-            plt.tight_layout()
-            st.pyplot(fig)
+            col1, col2 = st.columns(2)
 
-            # кумулятивный поток
-            df_cum = df_arrivals.sort_values("arrival_datetime").copy()
-            df_cum["cum_postings"] = df_cum["postings_count"].cumsum()
+            with col1:
+                fig, ax = plt.subplots(figsize=(8, 4))
+                ax.plot(df_arrivals["arrival_datetime"], df_arrivals["postings_num"],
+                        marker="o", markersize=3, alpha=0.7)
+                ax.set_title("Postings по времени прибытия")
+                ax.set_xlabel("Время прибытия")
+                ax.set_ylabel("Количество postings")
+                plt.xticks(rotation=45)
+                plt.tight_layout()
+                st.pyplot(fig)
 
-            fig2, ax2 = plt.subplots(figsize=(6, 3))
-            ax2.step(df_cum["arrival_datetime"], df_cum["cum_postings"], where="post")
-            ax2.set_title("Cumulative postings over time")
-            ax2.set_xlabel("arrival_datetime")
-            ax2.set_ylabel("cumulative postings_count")
-            plt.xticks(rotation=45)
-            plt.tight_layout()
-            st.pyplot(fig2)
+            with col2:
+                df_cum = df_arrivals.sort_values("arrival_datetime").copy()
+                df_cum["cum_postings"] = df_cum["postings_num"].cumsum()
 
-            # распределение по flow_type
-            flow_agg = df_arrivals.groupby("flow_type")["postings_count"].sum().reset_index()
-            fig3, ax3 = plt.subplots(figsize=(6, 3))
-            ax3.bar(flow_agg["flow_type"], flow_agg["postings_count"])
-            ax3.set_title("Total postings by flow_type")
-            ax3.set_xlabel("flow_type")
-            ax3.set_ylabel("postings_count")
-            plt.tight_layout()
-            st.pyplot(fig3)
+                fig2, ax2 = plt.subplots(figsize=(8, 4))
+                ax2.step(df_cum["arrival_datetime"], df_cum["cum_postings"], where="post", linewidth=2)
+                ax2.set_title("Кумулятивные postings")
+                ax2.set_xlabel("Время прибытия")
+                ax2.set_ylabel("Кумулятивное количество")
+                plt.xticks(rotation=45)
+                plt.tight_layout()
+                st.pyplot(fig2)
 
-# 3. Рабочие
+            if 'flow_type' in df_arrivals.columns:
+                flow_agg = df_arrivals.groupby("flow_type")["postings_num"].sum().reset_index()
+                fig3, ax3 = plt.subplots(figsize=(6, 4))
+                colors = ['#1f77b4', '#ff7f0e']
+                ax3.bar(flow_agg["flow_type"], flow_agg["postings_num"], color=colors)
+                ax3.set_title("Total postings по типу потока")  
+                ax3.set_ylabel("Количество postings")
+                plt.tight_layout()
+                st.pyplot(fig3)
+
 with tab_workers:
-    st.header("3. Рабочие")
+    st.header("Рабочие")
     if raw is None:
         st.warning("Сначала загрузите JSON на первой вкладке.")
     else:
@@ -189,60 +196,59 @@ with tab_workers:
         if df_workers is None or df_workers.empty:
             st.info("Нет данных по workers.")
         else:
-            st.subheader("Таблица")
-            st.dataframe(df_workers.head(200))
+            st.subheader("Таблица рабочих")
+            st.dataframe(df_workers.head(200), use_container_width=True)
 
-            # график по hard_work
-            if "hard_work" in df_workers.columns:
-                hard_counts = (
-                    df_workers["hard_work"]
-                    .astype(bool)
-                    .value_counts()
-                    .rename(index={True: "can_hard", False: "cant_hard"})
-                )
+            col1, col2, col3 = st.columns(3)
 
-                fig, ax = plt.subplots(figsize=(4, 4))
-                ax.bar(hard_counts.index, hard_counts.values, color=["tab:green", "tab:red"])
-                ax.set_title("Рабочие: могут ли выполнять тяжёлую работу")
-                ax.set_xlabel("статус")
-                ax.set_ylabel("количество")
-                plt.tight_layout()
-                st.pyplot(fig)
+            with col1:
+                if "hard_work" in df_workers.columns:
+                    hard_counts = (
+                        df_workers["hard_work"]
+                        .astype(bool)
+                        .value_counts()
+                        .rename(index={True: "Могут тяжёлую", False: "Не могут тяжёлую"})
+                    )
+                    fig, ax = plt.subplots(figsize=(6, 4))
+                    colors = ['#2ca02c', '#d62728']
+                    ax.bar(hard_counts.index, hard_counts.values, color=colors)
+                    ax.set_title("Способность к тяжёлой работе")
+                    ax.set_ylabel("Количество рабочих")
+                    for i, v in enumerate(hard_counts.values):
+                        ax.text(i, v + 1, str(v), ha='center', va='bottom')
+                    plt.tight_layout()
+                    st.pyplot(fig)
 
-            # производительность по зонам
-            perf_cols = [c for c in df_workers.columns if c.startswith("perf_")]
-            if perf_cols:
-                st.subheader("Распределение производительности по зонам")
+            with col2:
+                if "current_zone" in df_workers.columns:
+                    workers_per_zone = (
+                        df_workers["current_zone"]
+                        .value_counts(dropna=False)
+                        .reset_index()
+                    )
+                    workers_per_zone.columns = ["zone_id", "workers_count"]
+                    fig3, ax3 = plt.subplots(figsize=(6, 4))
+                    ax3.bar(workers_per_zone["zone_id"].astype(str), workers_per_zone["workers_count"])
+                    ax3.set_title("Рабочие по зонам")
+                    ax3.set_ylabel("Количество")
+                    plt.xticks(rotation=45)
+                    plt.tight_layout()
+                    st.pyplot(fig3)
 
-                fig2, ax2 = plt.subplots(figsize=(5, 3))
-                df_workers[perf_cols].boxplot(ax=ax2)
-                ax2.set_title("Производительность работников по зонам (boxplot)")
-                ax2.set_xlabel("зона")
-                ax2.set_ylabel("производительность")
-                plt.tight_layout()
-                st.pyplot(fig2)
-
-            # workers per current_zone
-            if "current_zone" in df_workers.columns:
-                workers_per_zone = (
-                    df_workers["current_zone"]
-                    .value_counts(dropna=False)
-                    .reset_index()
-                )
-                workers_per_zone.columns = ["zone_id", "workers_count"]
-
-                fig3, ax3 = plt.subplots(figsize=(6, 4))
-                ax3.bar(workers_per_zone["zone_id"].astype(str), workers_per_zone["workers_count"])
-                ax3.set_title("Количество рабочих в каждой текущей зоне")
-                ax3.set_xlabel("zone_id")
-                ax3.set_ylabel("количество рабочих")
-                plt.tight_layout()
-                st.pyplot(fig3)
-
-# 4. Станции — бэклоги
+            with col3:
+                perf_cols = [c for c in df_workers.columns if c.startswith("perf_")]
+                if perf_cols:
+                    perf_means = df_workers[perf_cols].mean().sort_values(ascending=False)
+                    fig4, ax4 = plt.subplots(figsize=(6, 4))
+                    perf_means.plot(kind='bar', ax=ax4)
+                    ax4.set_title("Средняя производительность по зонам")
+                    ax4.set_ylabel("Единиц/час")
+                    plt.xticks(rotation=45)
+                    plt.tight_layout()
+                    st.pyplot(fig4)
 
 with tab_stations_backlog:
-    st.header("4. Станции — бэклоги")
+    st.header("Станции")
     if raw is None:
         st.warning("Сначала загрузите JSON на первой вкладке.")
     else:
@@ -250,98 +256,81 @@ with tab_stations_backlog:
         if df_st is None or df_st.empty:
             st.info("Нет данных по stations.")
         else:
-            st.subheader("Таблица")
-            st.dataframe(df_st.head(200))
+            st.subheader("Таблица станций")
+            st.dataframe(df_st.head(200), use_container_width=True)
 
-            # bar: backlog_total по станциям
-            fig, ax = plt.subplots(figsize=(10, 4))
-            df_plot = df_st.sort_values("backlog_total", ascending=False)
-            ax.bar(df_plot["name"], df_plot["backlog_total"])
-            ax.set_title("Бэклог по станциям (всего)")
-            ax.set_xlabel("станция")
-            ax.set_ylabel("backlog_total")
-            plt.xticks(rotation=90)
-            plt.tight_layout()
-            st.pyplot(fig)
+            col1, col2 = st.columns(2)
 
-            # stacked bar SORT / NONSORT по станциям
-            bl_cols = [c for c in df_st.columns if c.startswith("backlog_")]
-            fig2, ax2 = plt.subplots(figsize=(10, 4))
-            bottom = None
-            for c in bl_cols:
-                values = df_plot[c]
-                ax2.bar(df_plot["name"], values, bottom=bottom, label=c)
-                bottom = values if bottom is None else bottom + values
-            ax2.set_title("Бэклог по станциям по типу потока")
-            ax2.set_xlabel("станция")
-            ax2.set_ylabel("backlog")
-            plt.xticks(rotation=90)
-            ax2.legend()
-            plt.tight_layout()
-            st.pyplot(fig2)
+            with col1:
+                if 'backlog_total' in df_st.columns:
+                    fig, ax = plt.subplots(figsize=(12, 10))
+                    df_plot = df_st.sort_values("backlog_total", ascending=False)
+                    ax.barh(range(len(df_plot)), df_plot["backlog_total"])
+                    ax.set_yticks(range(len(df_plot)))
+                    ax.set_yticklabels([f"{row['name'][:20]}..." if len(str(row['name'])) > 20 else str(row['name'])
+                                        for _, row in df_plot.iterrows()], fontsize=8)
+                    ax.set_title("Бэклог по станциям")
+                    ax.set_xlabel("Количество postings")
+                    plt.tight_layout()
+                    st.pyplot(fig)
 
-            # backlog по зонам
-            if "zone_id" in df_st.columns:
-                zone_backlog = (
-                    df_st.groupby("zone_id")[bl_cols]
-                    .sum()
-                    .reset_index()
-                )
-                fig3, ax3 = plt.subplots(figsize=(6, 4))
-                bottom = None
-                for c in bl_cols:
-                    vals = zone_backlog[c]
-                    ax3.bar(zone_backlog["zone_id"], vals, bottom=bottom, label=c)
-                    bottom = vals if bottom is None else bottom + vals
-                ax3.set_title("Бэклог по зонам")
-                ax3.set_xlabel("зона")
-                ax3.set_ylabel("backlog")
-                ax3.legend()
-                plt.tight_layout()
-                st.pyplot(fig3)
-
-# 5. Станции —
+            with col2:
+                if "zone_id" in df_st.columns:
+                    stations_per_zone = df_st.groupby("zone_id").agg({
+                        "name": "count",
+                        "workers_capacity": "sum"
+                    }).rename(columns={"name": "stations_count"})
+                    fig2, ax2 = plt.subplots(figsize=(8, 5))
+                    x = np.arange(len(stations_per_zone))
+                    width = 0.35
+                    ax2.bar(x, stations_per_zone["stations_count"], width, label="Станций")
+                    ax2.bar(x + width, stations_per_zone["workers_capacity"], width, label="Суммарная емкость")
+                    ax2.set_title("Станции и ёмкость по зонам")
+                    ax2.set_xticks(x + width / 2)
+                    ax2.set_xticklabels(stations_per_zone.index)
+                    ax2.legend()
+                    plt.xticks(rotation=45)
+                    plt.tight_layout()
+                    st.pyplot(fig2)
 
 with tab_stations_workers:
-    st.header("5. Станции — рабочие")
+    st.header("Станции и рабочие")
     if raw is None:
         st.warning("Сначала загрузите JSON на первой вкладке.")
     else:
         df_st = build_stations_df(raw)
         df_workers = build_workers_df(raw)
         if df_st is None or df_st.empty or df_workers is None or df_workers.empty:
-            st.info("Нет данных по stations или workers.")
+            st.info("Недостаточно данных.")
         else:
-            # workers per zone_id (по current_zone)
-            if "current_zone" in df_workers.columns:
-                workers_per_zone = (
-                    df_workers["current_zone"]
-                    .value_counts(dropna=False)
-                    .reset_index()
-                )
-                workers_per_zone.columns = ["zone_id", "workers_count"]
+            col1, col2 = st.columns(2)
 
-                fig, ax = plt.subplots(figsize=(6, 4))
-                ax.bar(workers_per_zone["zone_id"].astype(str), workers_per_zone["workers_count"])
-                ax.set_title("Количество рабочих по зонам (current_zone)")
-                ax.set_xlabel("zone_id")
-                ax.set_ylabel("workers_count")
-                plt.tight_layout()
-                st.pyplot(fig)
+            with col1:
+                if "current_zone" in df_workers.columns:
+                    workers_per_zone = df_workers["current_zone"].value_counts()
+                    fig, ax = plt.subplots(figsize=(8, 5))
+                    workers_per_zone.plot(kind='bar', ax=ax)
+                    ax.set_title("Распределение рабочих по зонам")
+                    ax.set_ylabel("Количество рабочих")
+                    plt.xticks(rotation=45)
+                    plt.tight_layout()
+                    st.pyplot(fig)
 
-            # stations per zone_id
-            if "zone_id" in df_st.columns:
-                stations_per_zone = (
-                    df_st["zone_id"]
-                    .value_counts()
-                    .reset_index()
-                )
-                stations_per_zone.columns = ["zone_id", "stations_count"]
-
-                fig2, ax2 = plt.subplots(figsize=(6, 4))
-                ax2.bar(stations_per_zone["zone_id"], stations_per_zone["stations_count"])
-                ax2.set_title("Количество станций по зонам")
-                ax2.set_xlabel("zone_id")
-                ax2.set_ylabel("stations_count")
-                plt.tight_layout()
-                st.pyplot(fig2)
+            with col2:
+                if "zone_id" in df_st.columns:
+                    stations_per_zone = df_st.groupby("zone_id").agg({
+                        "name": "count",
+                        "workers_capacity": "sum"
+                    }).rename(columns={"name": "stations_count"})
+                    fig2, ax2 = plt.subplots(figsize=(8, 5))
+                    x = np.arange(len(stations_per_zone))
+                    width = 0.35
+                    ax2.bar(x, stations_per_zone["stations_count"], width, label="Станций")
+                    ax2.bar(x + width, stations_per_zone["workers_capacity"], width, label="Суммарная емкость")
+                    ax2.set_title("Станции и ёмкость по зонам")
+                    ax2.set_xticks(x + width / 2)
+                    ax2.set_xticklabels(stations_per_zone.index)
+                    ax2.legend()
+                    plt.xticks(rotation=45)
+                    plt.tight_layout()
+                    st.pyplot(fig2)
