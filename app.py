@@ -157,39 +157,46 @@ with tab_arrivals:
 
             col1, col2 = st.columns(2)
             with col1:
-                st.subheader("📈 Динамика прибытий")
                 fig = make_subplots(
                     rows=2, cols=1,
                     subplot_titles=["Postings по времени прибытия", "Total postings по типу потока"],
-                    vertical_spacing=0.1,
-                    row_heights=[0.7, 0.3]
+                    vertical_spacing=0.15,  # ← Немного меньше зазор
+                    row_heights=[0.5, 0.5]  # ← Основной график больше
                 )
+
                 fig.add_trace(
                     go.Scatter(x=df_arrivals["arrival_datetime"], y=df_arrivals["postings_num"],
-                              mode='lines+markers', name='Postings', line=dict(color='#1f77b4'),
-                              hovertemplate='<b>%{x}</b><br>Postings: %{y:,}<extra></extra>'),
+                               mode='lines+markers', name='Postings', line=dict(color='#1f77b4'),
+                               hovertemplate='<b>%{x}</b><br>Postings: %{y:,}<extra></extra>'),
                     row=1, col=1
                 )
+
                 if 'flow_type' in df_arrivals.columns:
                     flow_agg = df_arrivals.groupby("flow_type")["postings_num"].sum().reset_index()
                     colors = ['#1f77b4', '#ff7f0e']
                     for i, row in flow_agg.iterrows():
                         fig.add_trace(
                             go.Bar(x=[row["flow_type"]], y=[row["postings_num"]],
-                                  marker_color=colors[i % len(colors)], name=row["flow_type"],
-                                  hovertemplate='<b>%{x}</b><br>Postings: %{y:,}<extra></extra>'),
+                                   marker_color=colors[i % len(colors)], name=row["flow_type"],
+                                   hovertemplate='<b>%{x}</b><br>Postings: %{y:,}<extra></extra>'),
                             row=2, col=1
                         )
-                fig.update_layout(height=500, showlegend=False, title_text="Анализ прибытий", template="plotly_white")
+
+                fig.update_layout(
+                    height=1000,  # ← Было 650 → 850px (шире!)
+                    showlegend=False,
+                    title_text="Анализ прибытий",
+                    template="plotly_white",
+                    margin=dict(t=90, b=60, l=60, r=60)  # ← Больше отступы
+                )
                 fig.update_xaxes(tickangle=45)
                 st.plotly_chart(fig, use_container_width=True)
 
             with col2:
-                st.subheader("📊 Кумулятивные postings")
                 df_cum = df_arrivals.sort_values("arrival_datetime").copy()
                 df_cum["cum_postings"] = df_cum["postings_num"].cumsum()
                 fig_cum = px.area(df_cum, x="arrival_datetime", y="cum_postings",
-                                 title="Кумулятивный объём прибытий", hover_data=["postings_num"])
+                                 title="📊 Кумулятивный объём прибытий", hover_data=["postings_num"])
                 fig_cum.update_traces(line_shape="hv")
                 fig_cum.update_layout(template="plotly_white")
                 st.plotly_chart(fig_cum, use_container_width=True)
@@ -212,7 +219,7 @@ with tab_workers:
                 if "hard_work" in df_workers.columns:
                     hard_counts = df_workers["hard_work"].astype(bool).value_counts().rename(index={True: "Да", False: "Нет"})
                     fig = px.bar(x=hard_counts.index, y=hard_counts.values,
-                                title="Способность выполнять тяжёлую работу", labels={'y': 'Количество рабочих'},
+                                title="📊 Способность выполнять тяжёлую работу", labels={'y': 'Количество рабочих'},
                                 color=hard_counts.index, color_discrete_map={"Да": "#2ca02c", "Нет": "#d62728"})
                     fig.update_layout(showlegend=False, template="plotly_white")
                     fig.update_traces(texttemplate="%{y}", textposition="outside")
@@ -222,7 +229,7 @@ with tab_workers:
                 if "current_zone" in df_workers.columns:
                     workers_per_zone = df_workers["current_zone"].value_counts(dropna=False).reset_index()
                     workers_per_zone.columns = ["zone_id", "workers_count"]
-                    fig = px.bar(workers_per_zone, x="zone_id", y="workers_count", title="Рабочие по зонам")
+                    fig = px.bar(workers_per_zone, x="zone_id", y="workers_count", title="📊 Рабочие по зонам", labels={'y': 'Количество рабочих', "workers_count": 'Количество рабочих'})
                     fig.update_layout(template="plotly_white", xaxis_tickangle=45)
                     st.plotly_chart(fig, use_container_width=True)
 
@@ -230,7 +237,7 @@ with tab_workers:
                 perf_cols = [c for c in df_workers.columns if c.startswith("perf_")]
                 if perf_cols:
                     perf_means = df_workers[perf_cols].mean().sort_values(ascending=False)
-                    fig = px.bar(x=perf_means.index, y=perf_means.values, title="Средняя производительность по зонам")
+                    fig = px.bar(x=perf_means.index, y=perf_means.values, title="📊 Средняя производительность по зонам", labels={'y': 'Производительность'})
                     fig.update_layout(template="plotly_white", xaxis_tickangle=45)
                     st.plotly_chart(fig, use_container_width=True)
 
@@ -250,27 +257,40 @@ with tab_stations_backlog:
             col1, col2 = st.columns(2)
 
             with col1:
-                st.subheader("📊 Бэклог станций")
 
-                # 1. Постинги ✅
+                # 1. ВСЕ станции по ПОСТИНГАМ
                 if 'backlog_total' in df_st.columns:
-                    df_plot = df_st.sort_values("backlog_total", ascending=False).head(20)
-                    df_plot["name_short"] = df_plot["name"].astype(str).str[:25] + df_plot["name"].astype(str).str[
-                        25:].apply(lambda x: "..." if len(x) > 0 else "")
-                    fig1 = px.bar(df_plot, y="name_short", x="backlog_total", title="Топ-20: Постинги",
+                    df_plot = df_st.sort_values("backlog_total", ascending=False)
+                    df_plot["name_short"] = df_plot["name"].astype(str).str[:30] + df_plot["name"].astype(str).str[
+                        30:].apply(lambda x: "..." if len(x) > 0 else "")
+                    fig1 = px.bar(df_plot, y="name_short", x="backlog_total",
+                                  title=f"📊 Все станции: Постинги (n={len(df_plot)})",
                                   orientation='h')
-                    fig1.update_layout(template="plotly_white", height=450)
+                    fig1.update_layout(template="plotly_white", height=650)
                     st.plotly_chart(fig1, use_container_width=True)
 
-                # 2. Юниты станций ✅
+                # 2. ВСЕ станции по ЮНИТАМ
                 if 'backlog_units' in df_st.columns and df_st["backlog_units"].sum() > 0:
-                    df_plot_units = df_st.sort_values("backlog_units", ascending=False).head(20)
-                    df_plot_units["name_short"] = df_plot_units["name"].astype(str).str[:25] + df_plot_units[
-                        "name"].astype(str).str[25:].apply(lambda x: "..." if len(x) > 0 else "")
-                    fig2 = px.bar(df_plot_units, y="name_short", x="backlog_units", title="Топ-20: Юниты",
+                    df_plot_units = df_st.sort_values("backlog_units", ascending=False)
+                    df_plot_units["name_short"] = df_plot_units["name"].astype(str).str[:30] + df_plot_units[
+                        "name"].astype(str).str[30:].apply(lambda x: "..." if len(x) > 0 else "")
+                    fig2 = px.bar(df_plot_units, y="name_short", x="backlog_units",
+                                  title=f"📊 Все станции: Юниты (n={len(df_plot_units)})",
                                   orientation='h')
-                    fig2.update_layout(template="plotly_white", height=450)
+                    fig2.update_layout(template="plotly_white", height=650)
                     st.plotly_chart(fig2, use_container_width=True)
+
+            with col2:
+                if "zone_id" in df_st.columns:
+                    stations_per_zone = df_st.groupby("zone_id").agg({
+                        "name": "count",
+                        "workers_capacity": "sum"
+                    }).rename(columns={"name": "stations_count"}).reset_index()
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(name="Станций", x=stations_per_zone["zone_id"], y=stations_per_zone["stations_count"], marker_color="#1f77b4"))
+                    fig.add_trace(go.Bar(name="Ёмкость рабочих", x=stations_per_zone["zone_id"], y=stations_per_zone["workers_capacity"], marker_color="#ff7f0e"))
+                    fig.update_layout(barmode='group', title="📊 Станции и ёмкость по зонам", height=450, template="plotly_white", xaxis_tickangle=45)
+                    st.plotly_chart(fig, use_container_width=True)
 
                 # 3. Зоны постинги ✅
                 if "zone_id" in df_st.columns and 'backlog_total' in df_st.columns:
@@ -282,18 +302,6 @@ with tab_stations_backlog:
                 # 4. Зоны юниты ✅
                 if "zone_id" in df_st.columns and 'backlog_units' in df_st.columns and df_st["backlog_units"].sum() > 0:
                     zone_units = df_st.groupby("zone_id")["backlog_units"].sum().reset_index()
-                    fig4 = px.bar(zone_units, x="zone_id", y="backlog_units", title="Зоны: Юниты")
+                    fig4 = px.bar(zone_units, x="zone_id", y="backlog_units", title="📊 Зоны: Юниты")
                     fig4.update_layout(template="plotly_white", xaxis_tickangle=45, height=450)
                     st.plotly_chart(fig4, use_container_width=True)
-
-            with col2:
-                if "zone_id" in df_st.columns:
-                    stations_per_zone = df_st.groupby("zone_id").agg({
-                        "name": "count",
-                        "workers_capacity": "sum"
-                    }).rename(columns={"name": "stations_count"}).reset_index()
-                    fig = go.Figure()
-                    fig.add_trace(go.Bar(name="Станций", x=stations_per_zone["zone_id"], y=stations_per_zone["stations_count"], marker_color="#1f77b4"))
-                    fig.add_trace(go.Bar(name="Ёмкость рабочих", x=stations_per_zone["zone_id"], y=stations_per_zone["workers_capacity"], marker_color="#ff7f0e"))
-                    fig.update_layout(barmode='group', title="Станции и ёмкость по зонам", height=450, template="plotly_white", xaxis_tickangle=45)
-                    st.plotly_chart(fig, use_container_width=True)
